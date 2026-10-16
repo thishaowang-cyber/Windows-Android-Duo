@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Glass shader — numeric verification</title>
+<style>
+  html, body { margin: 0; background: #14161c; color: #dfe3ea;
+               font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+  canvas { display: block; background: #000; border: 1px solid #333; }
+  #panel { max-width: 460px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  table { border-collapse: collapse; margin-top: 6px; }
+  td { padding: 1px 8px 1px 0; }
+  .k { color: #8b93a7; }
+  .ok { color: #6ee7a8; }
+  .bad { color: #ff7b72; }
+  pre { background: #1c1f27; padding: 8px; border-radius: 6px; overflow: auto; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="gl" width="800" height="500"></canvas>
+  <div id="panel">
+    <h1>玻璃着色器 · 逐像素对照验证</h1>
+    <div id="status">初始化…</div>
+    <pre id="report"></pre>
+    <div class="k">
+      左：GL 渲染结果。验证用 JS 复刻同一套数学，对每个输出像素
+      解析计算期望颜色，与 GL 实际输出逐像素比对。frost=0 时模糊半径为 0，
+      数学退化为精确映射，因此可以做严格比对。
+    </div>
+  </div>
+</div>
+<script type="module">
+const W = 800, H = 500;
+const SRC_W = 1600, SRC_H = 1000;
+const BG = [0.015, 0.018, 0.025];
+
+const params = { angle: 40, frost: 0.0, eye: 2.86, flip: 0, hingeTop: 0 };
+
+// ---------------------------------------------------------------- source image
+
+function makeSource() {
+  const c = document.createElement('canvas');
+  c.width = SRC_W; c.height = SRC_H;
+  const g = c.getContext('2d');
+
+  const grad = g.createLinearGradient(0, 0, SRC_W, SRC_H);
+  grad.addColorStop(0, '#12305e');
+  grad.addColorStop(0.5, '#2b1a4d');
+  grad.addColorStop(1, '#0d3b3a');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, SRC_W, SRC_H);
+
+  // Corner patches: make orientation and displacement unmistakable.
+  const patch = (x, y, w, h, fill, label) => {
+    g.fillStyle = fill;
+    g.fillRect(x, y, w, h);
+    g.fillStyle = '#000';
+    g.font = 'bold 46px monospace';
+    g.fillText(label, x + 16, y + 62);
+  };
+  patch(0, 0, 220, 220, '#ff4d4d', 'TL');
+  patch(SRC_W - 220, 0, 220, 220, '#4dff88', 'TR');
+  patch(0, SRC_H - 220, 220, 220, '#4d9dff', 'BL');
+  patch(SRC_W - 220, SRC_H - 220, 220, 220, '#ffd24d', 'BR');
+
+  // Fine checkerboard: makes blur and mip selection visible.
+  const cell = 16;
+  for (let y = 420; y < 580; y += cell) {
+    for (let x = 620; x < 980; x += cell) {
+      g.fillStyle = ((x / cell + y / cell) % 2 === 0) ? '#ffffff' : '#111111';
+      g.fillRect(x, y, cell, cell);
+    }
+  }
+
+  // Full-width horizontal bars every 100 px: reads out vertical remapping.
+  for (let i = 1; i < 10; i++) {
+    g.fillStyle = i % 2 ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.55)';
+    g.fillRect(240, i * 100 - 3, SRC_W - 480, 6);
+  }
+
+  return g.getImageData(0, 0, SRC_W, SRC_H);
+}
+
+const source = makeSource();
+
+// ---------------------------------------------------------------- reference math
+
+function sourceAt(u, v) {
+  const fx = u * SRC_W - 0.5, fy = v * SRC_H - 0.5;
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const tx = fx - x0, ty = fy - y0;
+  const cx0 = Math.min(Math.max(x0, 0), SRC_W - 1);
+  const cx1 = Math.min(Math.max(x0 + 1, 0), SRC_W - 1);
+  const cy0 = Math.min(Math.max(y0, 0), SRC_H - 1);
+  const cy1 = Math.min(Math.max(y0 + 1, 0), SRC_H - 1);
+  const out = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const p00 = source.data[(cy0 * SRC_W + cx0) * 4 + c];
+    const p10 = source.data[(cy0 * SRC_W + cx1) * 4 + c];
+    const p01 = source.data[(cy1 * SRC_W + cx0) * 4 + c];
+    const p11 = source.data[(cy1 * SRC_W + cx1) * 4 + c];
+    const top = p00 + (p10 - p00) * tx;
+    const bot = p01 + (p11 - p01) * tx;
+    out[c] = (top + (bot - top) * ty) / 255;
+  }
+  return out;
+}
+
+function sampleScene(point, lod) {
+  const screenAspect = W / H;
+  const imgAspect = SRC_W / SRC_H;
+  const fit = screenAspect > imgAspect
+    ? [1, screenAspect / imgAspect]
+    : [imgAspect / screenAspect, 1];
+  const u = (point[0] / W - 0.5) / fit[0] + 0.5;
+  const v = (point[1] / H - 0.5) / fit[1] + 0.5;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return BG.slice();
+  return sourceAt(u, v);   // lod is always 0 in the exact-compare configuration
+}
+
+/** Expected fragment colour for output pixel (x, y counted from the top). */
+function reference(x, y) {
+  // gl_FragCoord is measured from the bottom-left; the shader may rotate it 180°.
+  let coord = [x + 0.5, H - (y + 0.5)];
+  if (params.flip > 0.5) coord = [W - coord[0], H - coord[1]];
+
+  const pixel = [coord[0], H - coord[1]];
+  const theta = params.angle * Math.PI / 180;
+  const hingeTop = params.hingeTop > 0.5;
+  const dNorm = hingeTop ? (pixel[1] / H) : ((H - pixel[1]) / H);
+  // Width ratio: 1 on the hinge edge, shrinking with distance. y stays 1:1.
+  const w = params.eye / (params.eye + dNorm * Math.sin(theta));
+  const uvx = (pixel[0] / W - 0.5) / w + 0.5;
+  const uvy = pixel[1] / H;
+  const point = [uvx * W, uvy * H];
+  const gap = W * (1 - w) * 0.5;
+
+  const radius = Math.min(Math.abs(gap) * params.frost, H * 0.055);
+  let color = [0, 0, 0];
+  const N = 24;
+  for (let i = 0; i < N; i++) {
+    const r = Math.sqrt((i + 0.5) / N) * radius;
+    const a = i * 2.39996323;
+    const s = sampleScene([point[0] + Math.cos(a) * r, point[1] + Math.sin(a) * r], 0);
+    color[0] += s[0]; color[1] += s[1]; color[2] += s[2];
+  }
+  color = color.map(v => v / N);
+
+  const depth = Math.abs(gap) / H;
+  const dim = 1 - Math.min(depth * 0.45, 0.35);
+  color = color.map(v => v * dim);
+
+  const uvY = 1 - coord[1] / H;
+  const bandY = hingeTop ? uvY : (1 - uvY);
+  const t = (bandY - (0.25 + Math.sin(theta) * 0.7)) / 0.19;
+  const sheen = Math.exp(-t * t);
+  const k = sheen * Math.abs(Math.sin(theta)) * 0.055;
+  return [color[0] + 0.78 * k, color[1] + 0.87 * k, color[2] + 1.0 * k];
+}
+
+/** True when this output pixel samples outside the source, i.e. shows background. */
+function isOutside(x, y) {
+  let coord = [x + 0.5, H - (y + 0.5)];
+  if (params.flip > 0.5) coord = [W - coord[0], H - coord[1]];
+  const pixel = [coord[0], H - coord[1]];
+  const theta = params.angle * Math.PI / 180;
+  const dNorm = params.hingeTop > 0.5 ? (pixel[1] / H) : ((H - pixel[1]) / H);
+  const w = params.eye / (params.eye + dNorm * Math.sin(theta));
+  const uvx = (pixel[0] / W - 0.5) / w + 0.5;
+  const uvy = pixel[1] / H;
+  return uvx < 0 || uvx > 1 || uvy < 0 || uvy > 1;
+}
+
+/**
+ * On-screen bounding box of the whole source image, derived by inverting the
+ * mapping. Used to assert that no part of the picture is ever pushed off the
+ * screen: the box must stay inside [0,1]x[0,1] in normalised screen units.
+ */
+function contentBoundingBox() {
+  const theta = params.angle * Math.PI / 180;
+  const s = Math.sin(theta);
+  const hingeTop = params.hingeTop > 0.5;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const ux of [0, 1]) {
+    for (const uy of [0, 1, 0.5]) {
+      // uv.x = (px/W - 0.5)/w + 0.5  ->  px/W = (ux - 0.5)*w + 0.5
+      // w depends on the output height, which for a given source row is
+      // py/H = uy, so dNorm is fixed by the source row.
+      const dNorm = hingeTop ? uy : (1 - uy);
+      const w = params.eye / (params.eye + dNorm * s);
+      const px = ((ux - 0.5) * w + 0.5) * W;
+      const py = uy * H;
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+    }
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+// ---------------------------------------------------------------- GL
+
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+if (!gl) {
+  document.getElementById('status').innerHTML = '<span class="bad">WebGL2 不可用</span>';
+  throw new Error('no webgl2');
+}
+
+async function loadShader(name) {
+  const res = await fetch('./shaders/' + name, { cache: 'no-store' });
+  if (!res.ok) throw new Error('fetch ' + name + ' -> ' + res.status);
+  return res.text();
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+
+function buildProgram(vertSrc, fragSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vertSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
+function makeTexture() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+let program, uniforms, vao, texture;
+
+function render() {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform1i(uniforms.uTex, 0);
+  gl.uniform2f(uniforms.uSize, W, H);
+  gl.uniform1f(uniforms.uAngle, params.angle);
+  gl.uniform1f(uniforms.uFrost, params.frost);
+  gl.uniform1f(uniforms.uEye, params.eye);
+  gl.uniform1f(uniforms.uAspect, SRC_W / SRC_H);
+  gl.uniform1f(uniforms.uFlip, params.flip);
+  gl.uniform1f(uniforms.uHingeTop, params.hingeTop);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+}
+
+// ---------------------------------------------------------------- verification
+
+function readPixels() {
+  const buf = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  return buf;
+}
+
+/** GL readPixels row 0 is the bottom row; y here counts from the top. */
+function actualAt(buf, x, y) {
+  const row = H - 1 - y;
+  const o = (row * W + x) * 4;
+  return [buf[o], buf[o + 1], buf[o + 2]];
+}
+
+/** Reference evaluation is ~24 bilinear taps per pixel, so sample a grid. */
+function verify(step = 4) {
+  const buf = readPixels();
+  let maxErr = 0, sumErr = 0, over = 0, worst = null, bgHits = 0, tested = 0, outside = 0;
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const exp = reference(x, y);
+      const act = actualAt(buf, x, y);
+      for (let c = 0; c < 3; c++) {
+        const e = Math.round(Math.min(1, Math.max(0, exp[c])) * 255);
+        const d = Math.abs(e - act[c]);
+        if (d > maxErr) { maxErr = d; worst = { x, y, c, exp: e, act: act[c] }; }
+        sumErr += d;
+        if (d > 1) over++;
+      }
+      if (exp[0] === BG[0] && exp[1] === BG[1] && exp[2] === BG[2]) bgHits++;
+      if (isOutside(x, y)) outside++;
+      tested++;
+    }
+  }
+  const total = tested * 3;
+  return {
+    params: { ...params },
+    step,
+    pixelsTested: tested,
+    maxError: maxErr,
+    meanError: +(sumErr / total).toFixed(4),
+    channelsOver1: over,
+    channels: total,
+    backgroundPixels: bgHits,
+    outsidePixels: outside,
+    outsideFraction: +(outside / tested).toFixed(4),
+    worst,
+  };
+}
+
+function report(obj) {
+  const el = document.getElementById('report');
+  el.textContent = JSON.stringify(obj, null, 2);
+  const verdict = obj.maxError <= 1
+    ? '<span class="ok">PASS — 逐通道误差 ≤ 1/255</span>'
+    : '<span class="bad">FAIL — 与参考数学不一致</span>';
+  document.getElementById('status').innerHTML =
+    `angle=${obj.params.angle}° frost=${obj.params.frost} eye=${obj.params.eye}<br>` +
+    `max=${obj.maxError} mean=${obj.meanError} over1=${obj.channelsOver1}/${obj.channels}<br>${verdict}`;
+}
+
+// ---------------------------------------------------------------- boot
+
+const vertSrc = await loadShader('glass.vert');
+const fragSrc = await loadShader('glass.frag');
+program = buildProgram(vertSrc, fragSrc);
+uniforms = {};
+for (const n of ['uSize', 'uAngle', 'uFrost', 'uEye', 'uAspect', 'uTex', 'uFlip', 'uHingeTop']) {
+  uniforms[n] = gl.getUniformLocation(program, n);
+}
+vao = gl.createVertexArray();
+texture = makeTexture();
+render();
+
+window.__setParams = (p) => {
+  Object.assign(params, p);
+  render();
+  return { ...params };
+};
+window.__verify = () => { render(); const r = verify(); report(r); return r; };
+
+/**
+ * Blur path check. Exact comparison is impossible here because mipmap
+ * trilinear filtering cannot be reproduced bit-for-bit in JS, so check three
+ * properties instead: output stays finite, the hinge row (radius ~ 0) still
+ * matches, and the image actually gets smoother.
+ */
+window.__verifyBlur = () => {
+  const gradientEnergy = (buf) => {
+    let sum = 0, n = 0;
+    for (let y = 120; y < 380; y += 2) {
+      for (let x = 120; x < 680; x += 2) {
+        const a = actualAt(buf, x, y), b = actualAt(buf, x + 1, y);
+        sum += Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+        n++;
+      }
+    }
+    return sum / n;
+  };
+
+  window.__setParams({ frost: 0 });
+  render();
+  const sharp = readPixels();
+
+  window.__setParams({ frost: 0.09 });
+  render();
+  const blur = readPixels();
+
+  let maxBottom = 0;
+  for (let x = 0; x < W; x += 3) {
+    const exp = reference(x, H - 2);
+    const act = actualAt(blur, x, H - 2);
+    for (let c = 0; c < 3; c++) {
+      const e = Math.round(Math.min(1, Math.max(0, exp[c])) * 255);
+      maxBottom = Math.max(maxBottom, Math.abs(e - act[c]));
+    }
+  }
+
+  const result = {
+    gradientEnergySharp: +gradientEnergy(sharp).toFixed(3),
+    gradientEnergyBlur: +gradientEnergy(blur).toFixed(3),
+    smoothingRatio: +(gradientEnergy(blur) / gradientEnergy(sharp)).toFixed(3),
+    maxErrorHingeRow: maxBottom,
+    allFinite: blur.every((v) => Number.isFinite(v)),
+  };
+  result.pass = result.allFinite && result.maxErrorHingeRow <= 2 && result.smoothingRatio < 0.98;
+  document.getElementById('status').innerHTML =
+    `模糊路径：${result.pass ? '<span class="ok">PASS</span>' : '<span class="bad">FAIL</span>'}<br>` +
+    `平滑比 ${result.smoothingRatio}（越小越糊）· 铰链行误差 ${result.maxErrorHingeRow}`;
+  document.getElementById('report').textContent = JSON.stringify(result, null, 2);
+  return result;
+};
+window.__status = () => {
+  render();
+  return {
+    params: { ...params },
+    glError: gl.getError(),
+    glVersion: gl.getParameter(gl.VERSION),
+    renderer: gl.getParameter(gl.RENDERER),
+    size: [W, H],
+    sourceSize: [SRC_W, SRC_H],
+  };
+};
+
+document.getElementById('status').textContent = '就绪 — 调用 __verify() 开始对照';
+window.__ready = true;
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 自适应图标底色：取自 DUO 图标四角均色，保证与前景无缝衔接 -->
+    <color name="ic_launcher_background">#CAD5FD</color>
+</resources>

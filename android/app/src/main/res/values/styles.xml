@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      不继承 AppCompat 主题：本项目是纯 Compose（ComponentActivity），
+      为 XML 主题引入 AppCompat 只会多背一个依赖。
+      深色由 values-night 覆盖，跟随系统。
+    -->
+    <style name="Theme.LaptopHingeSensor" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/background_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+</resources>

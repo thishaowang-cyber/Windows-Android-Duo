@@ -1,0 +1,22 @@
+# 构建产物
+**/bin/
+**/obj/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/local.properties
+**/*.iml
+**/.idea/
+
+# 验证输出（测试数据，不入库）
+**/verify-out/
+**/verify-liquid-out/
+glass-shader-verify/*.png
+
+# JVM 崩溃日志
+**/hs_err_pid*.log
+**/replay_pid*.log
+
+# 系统
+.DS_Store
+Thumbs.db

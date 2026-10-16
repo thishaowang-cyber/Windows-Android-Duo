@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>对比：眼高对纵向黑边的影响</title>
+<style>
+  html, body { margin: 0; background: #14161c; color: #dfe3ea;
+               font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  canvas { border: 1px solid #333; background: #000; display: block; }
+  #status { padding: 8px 12px; }
+</style>
+</head>
+<body>
+<div id="status">渲染中…</div>
+<canvas id="out" width="1080" height="1620"></canvas>
+<script type="module">
+// Phone-shaped canvas (1080x2400 -> 0.45) with a source pre-cropped to the same
+// aspect, so fit == (1,1). Shows how the eye-height parameter controls whether
+// black bands appear on the top/bottom edges as well as the sides.
+const W = 360, H = 800;
+const EYES = [2.4, 1.8, 1.4];
+const ANGLES = [40, 70];
+
+const glc = document.createElement('canvas');
+glc.width = W; glc.height = H;
+const gl = glc.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+if (!gl) throw new Error('no webgl2');
+
+function makeSource(aspect) {
+  const sw = 450, sh = Math.round(sw / aspect);
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, sw, sh);
+  grad.addColorStop(0, '#1d3f7a');
+  grad.addColorStop(0.5, '#3a2260');
+  grad.addColorStop(1, '#0f4a48');
+  g.fillStyle = grad; g.fillRect(0, 0, sw, sh);
+
+  const s = Math.min(sw, sh);
+  g.strokeStyle = 'rgba(255,255,255,0.6)';
+  g.lineWidth = Math.max(1, s * 0.006);
+  for (let i = 1; i < 12; i++) { const y = sh * i / 12; g.beginPath(); g.moveTo(0, y); g.lineTo(sw, y); g.stroke(); }
+  for (let i = 1; i < 5; i++) { const x = sw * i / 5; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, sh); g.stroke(); }
+
+  const patch = (top, label, fill) => {
+    const ph = sh * 0.06;
+    g.fillStyle = fill; g.fillRect(0, top ? 0 : sh - ph, sw, ph);
+    g.fillStyle = '#000'; g.font = `bold ${Math.round(s * 0.07)}px monospace`;
+    g.fillText(label, sw * 0.04, (top ? 0 : sh - ph) + ph * 0.78);
+  };
+  patch(true, 'TOP', '#ff4d4d');
+  patch(false, 'BTM', '#ffd24d');
+
+  g.strokeStyle = '#fff'; g.lineWidth = Math.max(2, s * 0.012);
+  g.beginPath(); g.moveTo(sw / 2, sh * 0.42); g.lineTo(sw / 2, sh * 0.58); g.stroke();
+  g.beginPath(); g.moveTo(sw * 0.35, sh / 2); g.lineTo(sw * 0.65, sh / 2); g.stroke();
+
+  g.fillStyle = '#fff'; g.textAlign = 'center';
+  g.font = `bold ${Math.round(s * 0.1)}px sans-serif`;
+  g.fillText('GLASS', sw / 2, sh * 0.4);
+  return g.getImageData(0, 0, sw, sh);
+}
+
+async function loadShader(n) {
+  const r = await fetch('./shaders/' + n, { cache: 'no-store' });
+  if (!r.ok) throw new Error(n + ' ' + r.status);
+  return r.text();
+}
+function compile(t, src) {
+  const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, await loadShader('glass.vert')));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, await loadShader('glass.frag')));
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+const u = {};
+for (const n of ['uSize','uAngle','uFrost','uEye','uAspect','uTex','uFlip','uHingeTop'])
+  u[n] = gl.getUniformLocation(program, n);
+
+const vao = gl.createVertexArray();
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+const src = makeSource(W / H);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+gl.generateMipmap(gl.TEXTURE_2D);
+
+function draw(angle, eye) {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(u.uTex, 0);
+  gl.uniform2f(u.uSize, W, H);
+  gl.uniform1f(u.uAngle, angle);
+  gl.uniform1f(u.uFrost, 0.0);
+  gl.uniform1f(u.uEye, eye);
+  gl.uniform1f(u.uAspect, W / H);
+  gl.uniform1f(u.uFlip, 0);
+  gl.uniform1f(u.uHingeTop, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+const out = document.getElementById('out');
+const ctx = out.getContext('2d');
+ctx.fillStyle = '#0b0c10'; ctx.fillRect(0, 0, out.width, out.height);
+
+EYES.forEach((eye, r) => {
+  ctx.fillStyle = '#dfe3ea'; ctx.font = 'bold 22px ui-monospace, monospace';
+  ctx.fillText(`眼高 ${eye}`, 10, r * 540 + 30);
+  ANGLES.forEach((angle, c) => {
+    draw(angle, eye);
+    ctx.drawImage(glc, c * W, r * 540 + 44, W, H);
+    ctx.fillStyle = '#8b93a7'; ctx.font = '17px ui-monospace, monospace';
+    ctx.fillText(`倾角 ${angle}°`, c * W + 10, r * 540 + 66);
+  });
+});
+document.getElementById('status').textContent = '上：眼高 2.4（当前默认）  中：1.8  下：1.4';
+
+window.__save = async (name = 'eye-compare.png') => {
+  const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
+  const res = await fetch('/save/' + name, { method: 'POST', body: blob });
+  return await res.text();
+};
+window.__ready = true;
+</script>
+</body>
+</html>

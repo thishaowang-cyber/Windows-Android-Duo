@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      阶段一~四（传感器 + 角度）不需要任何运行时权限。
+
+      阶段五（BLE Peripheral）启用时需要以下权限，先在清单中预留声明，
+      安装时不会提示用户（普通权限），只有真正调用 BLE API 才需要：
+      <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+      <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+      <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    -->
+
+    <!-- 把开合角通过局域网 UDP 送到电脑（信标发现 + 单播）。普通权限，安装时
+         不会提示用户。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 部分设备把加速度计/陀螺仪标为可选，这里不强制要求，由 App 运行时检测 -->
+    <uses-feature
+        android:name="android.hardware.sensor.accelerometer"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.sensor.gyroscope"
+        android:required="false" />
+
+    <!-- 选择图片用。系统相册选择器（Android 11+/13+）不需要权限；只有回退到
+         图库 ACTION_PICK 时才需要读媒体权限，用来打开相册而不是文件管理器。 -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LaptopHingeSensor">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="portrait"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.LaptopHingeSensor">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

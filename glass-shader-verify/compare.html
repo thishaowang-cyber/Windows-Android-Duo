@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>对比：源图比例对黑边的影响</title>
+<style>
+  html, body { margin: 0; background: #14161c; color: #dfe3ea;
+               font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+  canvas { border: 1px solid #333; background: #000; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="out" width="1080" height="1600"></canvas>
+  <div><div id="status">渲染中…</div></div>
+</div>
+<script type="module">
+// Reproduces the phone's display aspect (1080x2400) and renders the same tile
+// three times per row at increasing tilt: once with the source aspect the user
+// actually picked, once with the source pre-cropped to the display aspect.
+const W = 360, H = 800;
+const ANGLES = [0, 30, 60];
+const FROST = 0.05, EYE = 2.4;
+
+const glc = document.createElement('canvas');
+glc.width = W; glc.height = H;
+const gl = glc.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+if (!gl) throw new Error('no webgl2');
+
+// ------------------------------------------------------------------ source
+
+function makeSource(aspect) {
+  const sw = 1000, sh = Math.round(sw / aspect);
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, sw, sh);
+  grad.addColorStop(0, '#12305e');
+  grad.addColorStop(0.5, '#2b1a4d');
+  grad.addColorStop(1, '#0d3b3a');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, sw, sh);
+
+  const s = Math.min(sw, sh);
+  const patch = (right, bottom, label, fill) => {
+    const pw = sw * 0.22, ph = sh * 0.1;
+    const x = right ? sw - pw : 0;
+    const y = bottom ? sh - ph : 0;
+    g.fillStyle = fill;
+    g.fillRect(x, y, pw, ph);
+    g.fillStyle = '#000';
+    g.font = `bold ${Math.round(s * 0.055)}px monospace`;
+    g.fillText(label, x + pw * 0.08, y + ph * 0.72);
+  };
+  patch(false, false, 'TL', '#ff4d4d');
+  patch(true, false, 'TR', '#4dff88');
+  patch(false, true, 'BL', '#4d9dff');
+  patch(true, true, 'BR', '#ffd24d');
+
+  g.strokeStyle = 'rgba(255,255,255,0.55)';
+  g.lineWidth = Math.max(1, s * 0.004);
+  for (let i = 1; i < 10; i++) {
+    const y = sh * i / 10;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(sw, y); g.stroke();
+  }
+  for (let i = 1; i < 6; i++) {
+    const x = sw * i / 6;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, sh); g.stroke();
+  }
+
+  g.strokeStyle = '#fff';
+  g.lineWidth = Math.max(2, s * 0.008);
+  g.beginPath(); g.moveTo(sw / 2, sh * 0.36); g.lineTo(sw / 2, sh * 0.64); g.stroke();
+  g.beginPath(); g.moveTo(sw * 0.34, sh / 2); g.lineTo(sw * 0.66, sh / 2); g.stroke();
+
+  const cell = Math.max(4, Math.round(s * 0.02));
+  for (let y = sh * 0.42; y < sh * 0.58; y += cell) {
+    for (let x = sw * 0.3; x < sw * 0.7; x += cell) {
+      g.fillStyle = ((Math.round(x / cell) + Math.round(y / cell)) % 2 === 0) ? '#ffffff' : '#111111';
+      g.fillRect(x, y, cell, cell);
+    }
+  }
+
+  g.fillStyle = '#fff';
+  g.textAlign = 'center';
+  g.font = `bold ${Math.round(s * 0.08)}px sans-serif`;
+  g.fillText('GLASS', sw / 2, sh * 0.33);
+  return g.getImageData(0, 0, sw, sh);
+}
+
+// ------------------------------------------------------------------ gl setup
+
+async function loadShader(name) {
+  const res = await fetch('./shaders/' + name, { cache: 'no-store' });
+  if (!res.ok) throw new Error('fetch ' + name + ' ' + res.status);
+  return res.text();
+}
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, await loadShader('glass.vert')));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, await loadShader('glass.frag')));
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+
+const u = {};
+for (const n of ['uSize', 'uAngle', 'uFrost', 'uEye', 'uAspect', 'uTex']) {
+  u[n] = gl.getUniformLocation(program, n);
+}
+const vao = gl.createVertexArray();
+const texture = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, texture);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function uploadSource(source) {
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  gl.generateMipmap(gl.TEXTURE_2D);
+}
+
+function draw(angle, srcAspect) {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(program);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform1i(u.uTex, 0);
+  gl.uniform2f(u.uSize, W, H);
+  gl.uniform1f(u.uAngle, angle);
+  gl.uniform1f(u.uFrost, FROST);
+  gl.uniform1f(u.uEye, EYE);
+  gl.uniform1f(u.uAspect, srcAspect);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ------------------------------------------------------------------ montage
+
+const out = document.getElementById('out');
+const ctx = out.getContext('2d');
+ctx.fillStyle = '#0b0c10';
+ctx.fillRect(0, 0, out.width, out.height);
+
+const rows = [
+  { aspect: 1.0, title: '现状：源图 401x401（比例 1.0），屏幕比例 0.45' },
+  { aspect: W / H, title: '修复：源图先裁成屏幕比例 0.45' },
+];
+
+rows.forEach((row, r) => {
+  ctx.fillStyle = '#dfe3ea';
+  ctx.font = 'bold 22px ui-monospace, monospace';
+  ctx.fillText(row.title, 12, r * 800 + 32);
+  uploadSource(makeSource(row.aspect));
+  ANGLES.forEach((angle, c) => {
+    draw(angle, row.aspect);
+    ctx.drawImage(glc, c * W, r * 800 + 48, W, H);
+    ctx.fillStyle = '#8b93a7';
+    ctx.font = '18px ui-monospace, monospace';
+    ctx.fillText(`倾角 ${angle}°`, c * W + 12, r * 800 + 74);
+  });
+});
+
+document.getElementById('status').textContent = '完成：上排=当前行为，下排=裁切后';
+
+window.__save = async (name = 'aspect-compare.png') => {
+  const blob = await new Promise((res) => out.toBlob(res, 'image/png'));
+  const r = await fetch('/save/' + name, { method: 'POST', body: blob });
+  return await r.text();
+};
+window.__ready = true;
+</script>
+</body>
+</html>

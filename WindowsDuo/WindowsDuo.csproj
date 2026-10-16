@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Windows 11 22H2 TFM: needed for Windows.Graphics.Capture (GPU-side
+         screen capture) and for GraphicsCaptureSession.IsBorderRequired, which
+         lets the mandatory yellow capture border be switched off. -->
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>WindowsDuo</RootNamespace>
+    <AssemblyName>WindowsDuo</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Shaders\Glass.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Sparse package layout: logos sit beside the executable so the build
+         output folder can be registered as-is. The manifest itself is copied by
+         the target below — the SDK reserves the name AppxManifest.xml and drops
+         it from ordinary copy items. -->
+    <None Update="msix\Assets\*.png" CopyToOutputDirectory="PreserveNewest" Link="Assets\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="CopySparsePackageManifest" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\msix\AppxManifest.xml"
+          DestinationFiles="$(OutDir)AppxManifest.xml"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

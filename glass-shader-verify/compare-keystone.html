@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>对比：眼点透视 vs 倾斜补偿</title>
+<style>
+  html, body { margin: 0; background: #14161c; color: #dfe3ea;
+               font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  canvas { border: 1px solid #333; background: #000; display: block; }
+  #status { padding: 8px 12px; }
+</style>
+</head>
+<body>
+<div id="status">渲染中…</div>
+<canvas id="out" width="1080" height="2610"></canvas>
+<script type="module">
+window.addEventListener('error', (e) => {
+  const el = document.getElementById('status');
+  if (el) el.textContent = 'ERR: ' + (e.message || e.error);
+});
+// Two ways to react to the phone tilting by θ (θ = angle between the screen
+// normal and the direction to the eye; θ=0 means the phone faces you).
+//
+//   row 1  眼点透视    the reference model, with the eye distance now a derived
+//                     physical quantity: uEye = viewing distance / screen height
+//   row 2  倾斜补偿    inverse-compensate the cos θ vertical compression, so the
+//                     picture keeps looking like a vertical one. Needs no eye
+//                     distance; the overflow becomes black bars.
+const W = 360, H = 800;
+const ANGLES = [20, 40, 60];
+// 6.78" panel, 1080x2400 @ 388 dpi -> screen height 0.157 m
+const SCREEN_HEIGHT_M = 2400 / 388.03 / 39.3701;
+const VIEWING_DISTANCE_M = 0.6;
+
+const glc = document.createElement('canvas');
+glc.width = W; glc.height = H;
+const gl = glc.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+if (!gl) throw new Error('no webgl2');
+
+function makeSource(aspect) {
+  const sw = 450, sh = Math.round(sw / aspect);
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1b2a4a'; g.fillRect(0, 0, sw, sh);
+
+  // square grid: any aspect distortion shows up immediately
+  g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 1;
+  const cell = sh / 12;
+  for (let i = 0; i <= 12; i++) {
+    const y = i * cell;
+    g.beginPath(); g.moveTo(0, y); g.lineTo(sw, y); g.stroke();
+  }
+  for (let x = 0; x <= sw; x += cell) {
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, sh); g.stroke();
+  }
+
+  // circles: the honest test for "does it still look vertical"
+  g.strokeStyle = '#ffd24d'; g.lineWidth = 4;
+  const cy = sh * 0.28;
+  [0.22, 0.34, 0.46].forEach((r) => {
+    g.beginPath();
+    g.arc(sw / 2, cy, sh * r * 0.5, 0, Math.PI * 2);
+    g.stroke();
+  });
+
+  g.fillStyle = '#ff4d4d';
+  g.fillRect(0, 0, sw, sh * 0.035);
+  g.fillStyle = '#4dff88';
+  g.fillRect(0, sh * 0.965, sw, sh * 0.035);
+  g.fillStyle = '#fff'; g.textAlign = 'center';
+  g.font = `bold ${Math.round(sh * 0.05)}px sans-serif`;
+  g.fillText('VERTICAL?', sw / 2, sh * 0.62);
+  g.font = `${Math.round(sh * 0.028)}px monospace`;
+  g.fillStyle = '#9fb0d0';
+  g.fillText('circles must stay round', sw / 2, sh * 0.68);
+  return g.getImageData(0, 0, sw, sh);
+}
+
+async function loadShader(n) {
+  const r = await fetch('./shaders/' + n, { cache: 'no-store' });
+  if (!r.ok) throw new Error(n + ' ' + r.status);
+  return r.text();
+}
+function compile(t, src) {
+  const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function link(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+const VERT = await loadShader('glass.vert');
+const refProg = link(VERT, await loadShader('glass.frag'));
+const refU = {};
+for (const n of ['uSize','uAngle','uFrost','uEye','uAspect','uTex','uFlip','uHingeTop'])
+  refU[n] = gl.getUniformLocation(refProg, n);
+
+// Inverse compensation: undo the cos θ vertical compression the viewer sees.
+const KEY_FRAG = `#version 300 es
+precision highp float;
+uniform vec2 uSize;
+uniform float uAngle;
+uniform sampler2D uTex;
+out vec4 fragColor;
+const vec3 BG = vec3(0.015, 0.018, 0.025);
+void main() {
+    vec2 pixel = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y);
+    float theta = radians(uAngle);
+    // 屏幕相对视线倾斜 θ 时，观者看到的纵向被压缩 cos θ；预先把图纵向拉开 1/cos θ
+    // 抵消掉，观者看到的就是一张竖直的图。超出的部分落到画面外，成为黑边。
+    float k = 1.0 / max(cos(theta), 0.15);
+    vec2 uv = vec2(pixel.x / uSize.x, (pixel.y / uSize.y - 0.5) * k + 0.5);
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        fragColor = vec4(BG, 1.0);
+        return;
+    }
+    fragColor = vec4(texture(uTex, uv).rgb, 1.0);
+}`;
+const keyProg = link(VERT, KEY_FRAG);
+const keyU = {};
+for (const n of ['uSize','uAngle','uTex']) keyU[n] = gl.getUniformLocation(keyProg, n);
+
+// Aspect-preserving compensation: keep the full height, take only cos θ of the
+// width. The viewer sees the horizontal uncompressed and the vertical squashed
+// by cos θ, so narrowing the width by cos θ makes the two cancel: the picture
+// reads as a vertical one, stays complete, and the slack shows up as black
+// bars on the left and right.
+const ASPECT_FRAG = `#version 300 es
+precision highp float;
+uniform vec2 uSize;
+uniform float uAngle;
+uniform sampler2D uTex;
+out vec4 fragColor;
+const vec3 BG = vec3(0.015, 0.018, 0.025);
+void main() {
+    vec2 pixel = vec2(gl_FragCoord.x, uSize.y - gl_FragCoord.y);
+    float c = max(cos(radians(uAngle)), 0.15);
+    vec2 uv = vec2((pixel.x / uSize.x - 0.5) / c + 0.5, pixel.y / uSize.y);
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        fragColor = vec4(BG, 1.0);
+        return;
+    }
+    fragColor = vec4(texture(uTex, uv).rgb, 1.0);
+}`;
+const aspProg = link(VERT, ASPECT_FRAG);
+const aspU = {};
+for (const n of ['uSize','uAngle','uTex']) aspU[n] = gl.getUniformLocation(aspProg, n);
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+const src = makeSource(W / H);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+gl.generateMipmap(gl.TEXTURE_2D);
+
+const EYE = VIEWING_DISTANCE_M / SCREEN_HEIGHT_M;
+
+function drawRef(angle) {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(refProg);
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(refU.uTex, 0);
+  gl.uniform2f(refU.uSize, W, H);
+  gl.uniform1f(refU.uAngle, angle);
+  gl.uniform1f(refU.uFrost, 0.0);
+  gl.uniform1f(refU.uEye, EYE);
+  gl.uniform1f(refU.uAspect, W / H);
+  gl.uniform1f(refU.uFlip, 0);
+  gl.uniform1f(refU.uHingeTop, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function drawKey(angle) {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(keyProg);
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(keyU.uTex, 0);
+  gl.uniform2f(keyU.uSize, W, H);
+  gl.uniform1f(keyU.uAngle, angle);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function drawAspect(angle) {
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(aspProg);
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(aspU.uTex, 0);
+  gl.uniform2f(aspU.uSize, W, H);
+  gl.uniform1f(aspU.uAngle, angle);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+const out = document.getElementById('out');
+const ctx = out.getContext('2d');
+ctx.fillStyle = '#0b0c10'; ctx.fillRect(0, 0, out.width, out.height);
+
+const ROW_H = 870;
+const rows = [
+  { title: `眼点透视（眼高 = 观看距离/屏高 = ${EYE.toFixed(2)}，即 0.6 m）`, draw: drawRef },
+  { title: '纵向补偿：拉高 1/cos θ —— 圆保住了，但上下溢出、只看到中间一段', draw: drawKey },
+  { title: '等比补偿：填满高度、宽度取 cos θ —— 圆保住且整幅完整，左右出黑边', draw: drawAspect },
+];
+rows.forEach((row, r) => {
+  ctx.fillStyle = '#dfe3ea'; ctx.font = 'bold 19px ui-monospace, monospace';
+  ctx.fillText(row.title, 10, r * ROW_H + 26);
+  ANGLES.forEach((angle, c) => {
+    row.draw(angle);
+    ctx.drawImage(glc, c * W, r * ROW_H + 40, W, H);
+    ctx.fillStyle = '#8b93a7'; ctx.font = '17px ui-monospace, monospace';
+    ctx.fillText(`θ = ${angle}°`, c * W + 10, r * ROW_H + 62);
+  });
+});
+document.getElementById('status').textContent =
+  `完成　屏高 ${(SCREEN_HEIGHT_M * 100).toFixed(1)} cm　眼高 ${EYE.toFixed(2)}`;
+
+window.__save = async (name = 'keystone-compare.png') => {
+  const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
+  const res = await fetch('/save/' + name, { method: 'POST', body: blob });
+  return await res.text();
+};
+window.__ready = true;
+</script>
+</body>
+</html>
