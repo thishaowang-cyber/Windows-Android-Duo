@@ -1,0 +1,2 @@
+# Windows-Android-Duo
+通过手机的传感器信息来同步电脑铰链的闭合角度，同时在Android和Windows上实现悬浮玻璃的效果
