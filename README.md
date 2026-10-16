@@ -13,7 +13,7 @@
 
 ```mermaid
 graph LR
-    S["手机贴在屏盖上<br/>TYPE_GRAVITY 传感器"] -->|"h = acos(−az ⁄ |a|)"| APP["DUO app<br/>算出开合角"]
+    S["手机贴在屏盖上<br/>TYPE_GRAVITY 传感器"] -->|"h = acos(−az ⁄ ‖a‖)"| APP["DUO app<br/>算出开合角"]
     APP -->|"TCP :45680<br/>手机当服务端"| PC["WindowsDuo<br/>桌面悬浮玻璃"]
     APP --> GLES["GLES 3.0<br/>手机本机玻璃页"]
     PC --> GPU["D3D11 + HLSL<br/>磨砂 · 折射 · 高光"]
